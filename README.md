@@ -16,11 +16,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/joeychilson/uvgo"
 )
+
+type SalesData struct {
+	Date     string  `json:"date"`
+	Product  string  `json:"product"`
+	Quantity int     `json:"quantity"`
+	Price    float64 `json:"price"`
+}
 
 type SalesAnalysis struct {
 	TotalRevenue     float64            `json:"total_revenue"`
@@ -36,27 +45,22 @@ type ProductAnalysis struct {
 	Quantity int     `json:"quantity"`
 }
 
-func main() {
-	ctx := context.Background()
-
-	uv, err := uvgo.New(uvgo.WithDependencies("pandas"))
+func AnalyzeSalesScript(ctx context.Context, sales []SalesData) (string, error) {
+	salesJSON, err := json.Marshal(sales)
 	if err != nil {
-		log.Fatal("Failed to create runner:", err)
+		return "", fmt.Errorf("failed to marshal sales data: %w", err)
 	}
 
-	script := `
+	script := fmt.Sprintf(`
 import pandas as pd
 import json
 from datetime import datetime
 
-data = {
-    'date': ['2024-01-01', '2024-01-15', '2024-02-01', '2024-02-15', '2024-03-01'],
-    'product': ['Widget A', 'Widget B', 'Widget A', 'Widget C', 'Widget B'],
-    'quantity': [10, 5, 8, 12, 6],
-    'price': [100, 150, 100, 75, 150]
-}
 
-df = pd.DataFrame(data)
+input_data = json.loads('''%s''')
+
+df = pd.DataFrame(input_data)
+
 df['date'] = pd.to_datetime(df['date'])
 df['revenue'] = df['quantity'] * df['price']
 
@@ -76,10 +80,10 @@ for _, row in product_analysis.iterrows():
         'quantity': int(row['quantity'])
     })
 
-monthly_sales = df.groupby(df['date'].dt.strftime('%Y-%m'))['revenue'].sum().to_dict()
+monthly_sales = df.groupby(df['date'].dt.strftime('%%Y-%%m'))['revenue'].sum().to_dict()
 
-first_month = df[df['date'].dt.strftime('%Y-%m') == '2024-01']['revenue'].sum()
-last_month = df[df['date'].dt.strftime('%Y-%m') == '2024-03']['revenue'].sum()
+first_month = df[df['date'].dt.strftime('%%Y-%%m') == df['date'].dt.strftime('%%Y-%%m').min()]['revenue'].sum()
+last_month = df[df['date'].dt.strftime('%%Y-%%m') == df['date'].dt.strftime('%%Y-%%m').max()]['revenue'].sum()
 growth_rate = ((last_month - first_month) / first_month) * 100 if first_month > 0 else 0
 
 analysis = {
@@ -91,14 +95,35 @@ analysis = {
 }
 
 print(json.dumps(analysis))
-`
+`, strings.ReplaceAll(string(salesJSON), "'", "\\'"))
+
+	return script, nil
+}
+
+func main() {
+	salesData := []SalesData{
+		{Date: "2024-01-01", Product: "Product A", Quantity: 10, Price: 100},
+		{Date: "2024-01-15", Product: "Product B", Quantity: 5, Price: 150},
+		{Date: "2024-02-01", Product: "Product A", Quantity: 8, Price: 100},
+		{Date: "2024-02-15", Product: "Product C", Quantity: 12, Price: 75},
+		{Date: "2024-03-01", Product: "Product B", Quantity: 6, Price: 150},
+	}
+
+	ctx := context.Background()
+	script, err := AnalyzeSalesScript(ctx, salesData)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	uv, err := uvgo.New(uvgo.WithDependencies("pandas"))
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	result, err := uvgo.StructuredOutputFromString[SalesAnalysis](ctx, uv, script)
 	if err != nil {
-		log.Fatalf("failed to run script: %v", err)
+		log.Fatal(err)
 	}
-
-	fmt.Printf("Duration: %s\n", result.Duration)
 
 	fmt.Printf("Sales Analysis Results:\n")
 	fmt.Printf("Total Revenue: $%.2f\n", result.Data.TotalRevenue)
@@ -119,8 +144,7 @@ print(json.dumps(analysis))
 		fmt.Printf("- %s: $%.2f\n", month, revenue)
 	}
 
-	if result.ExitCode != 0 {
-		fmt.Printf("\nWarnings/Errors:\n%s\n", result.Stderr)
-	}
+	fmt.Printf("System Time: %s\n", result.SystemTime)
+	fmt.Printf("User Time: %s\n", result.UserTime)
 }
 ```
