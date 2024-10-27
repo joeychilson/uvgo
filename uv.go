@@ -1,8 +1,10 @@
 package uvgo
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,10 +77,10 @@ func WithScriptArgs(args ...string) Option {
 
 // Result represents the output of a script execution
 type Result struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
-	Duration time.Duration
+	Stdout     string
+	Stderr     string
+	SystemTime time.Duration
+	UserTime   time.Duration
 }
 
 // Run executes a Python script from a file with optional arguments
@@ -143,15 +145,13 @@ func (r *Runner) execute(ctx context.Context, scriptPath, scriptContent string, 
 		cmd.Stdin = strings.NewReader(scriptContent)
 	}
 
-	startTime := time.Now()
 	err := cmd.Run()
-	endTime := time.Now()
 
 	result := &Result{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: cmd.ProcessState.ExitCode(),
-		Duration: endTime.Sub(startTime),
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		SystemTime: cmd.ProcessState.SystemTime(),
+		UserTime:   cmd.ProcessState.UserTime(),
 	}
 
 	if err != nil {
@@ -167,4 +167,85 @@ func (r *Runner) execute(ctx context.Context, scriptPath, scriptContent string, 
 		return result, fmt.Errorf("script execution failed: %w", err)
 	}
 	return result, nil
+}
+
+// StructuredResult adds typed data to the base Result
+type StructuredResult[T any] struct {
+	*Result
+	Data T
+}
+
+// StructuredOutput runs a script and parses its output into the specified type
+func StructuredOutput[T any](ctx context.Context, r *Runner, scriptPath string, args ...string) (*StructuredResult[T], error) {
+	scriptContent, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read script file: %w", err)
+	}
+
+	if err := validateJSONPrint(string(scriptContent)); err != nil {
+		return nil, fmt.Errorf("invalid script format: %w", err)
+	}
+
+	result, err := r.Run(ctx, scriptPath, args...)
+	if err != nil {
+		return &StructuredResult[T]{Result: result}, err
+	}
+
+	var output T
+	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
+		return &StructuredResult[T]{Result: result}, fmt.Errorf("failed to unmarshal script output: %w", err)
+	}
+
+	return &StructuredResult[T]{
+		Result: result,
+		Data:   output,
+	}, nil
+}
+
+// StructuredOutputFromString runs a script from a string and parses its output into the specified type
+func StructuredOutputFromString[T any](ctx context.Context, r *Runner, script string, args ...string) (*StructuredResult[T], error) {
+	if err := validateJSONPrint(script); err != nil {
+		return nil, fmt.Errorf("invalid script format: %w", err)
+	}
+
+	result, err := r.RunFromString(ctx, script, args...)
+	if err != nil {
+		return &StructuredResult[T]{Result: result}, err
+	}
+
+	var output T
+	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
+		return &StructuredResult[T]{Result: result}, fmt.Errorf("failed to unmarshal script output: %w", err)
+	}
+
+	return &StructuredResult[T]{
+		Result: result,
+		Data:   output,
+	}, nil
+}
+
+func validateJSONPrint(script string) error {
+	if strings.TrimSpace(script) == "" {
+		return fmt.Errorf("empty script provided")
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(script))
+	var lastNonEmptyLine string
+
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			lastNonEmptyLine = line
+			break
+		}
+	}
+
+	if !strings.Contains(lastNonEmptyLine, "print(json.dumps") {
+		return fmt.Errorf("script must end with print(json.dumps(...)) for structured output")
+	}
+	return nil
 }
